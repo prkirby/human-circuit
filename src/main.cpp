@@ -1,25 +1,20 @@
 #include <Arduino.h>
 #include <CapacitiveSensor.h>
+#include <LiquidCrystal_I2C.h>
 
-/*
- * CapitiveSense Library Demo Sketch
- * Paul Badger 2008
- * Uses a high value resistor e.g. 10M between send pin and receive pin
- * Resistor effects sensitivity, experiment with values, 50K - 50M. Larger resistor values yield larger sensor values.
- * Receive pin is the sensor pin - try different amounts of foil/metal on this pin
- */
+LiquidCrystal_I2C lcd(0x27, 20, 4); // set the LCD address to 0x27 for a 16 chars and 2 line display
 
 /**
- * @brief
- * 1. Check pot values for thresholds - 200ms loop
- * 2. Update display values - 200ms loop
+ * General Overview:
+ *
+ * 1. Check pot values for thresholds - intervaled loop
+ * 2. Update display values - when outputs change
  * 3. Check cap sensors - 50ms loop
- *    a. IF both high - check impedence every 50ms for 500ms - sending BOTH_HANDS while doing so
+ *    a. IF both high - check impedence every sensor cycle for defined interval - sending BOTH_HANDS while doing so
  *       i. IF impedence passes, send JOINED
- *          - Monitor impedence for max 3s for drop off, exit state if necessary
- *          - Fall back to cap check and repeat
+ *          - Fall back to cap check if no longer joined, and repeat
  *    b. Send state at end of each 50ms loop
- * 4. Indicator LEDs update at each 50ms loop
+ * 4. Indicator LEDs update when ouput state changes
  *
  * States:
  * OutputState  - current state for outputting
@@ -38,8 +33,8 @@
  */
 
 #define CAP_SEND_PIN 7
-#define CAP_RECEIVE_1 5
-#define CAP_RECEIVE_2 9
+#define CAP_RECEIVE_L 5
+#define CAP_RECEIVE_R 9
 #define IMP_CHECK A7
 #define CAP_L_POT A0
 #define CAP_R_POT A1
@@ -50,27 +45,50 @@
 #define CAP_R_LED 3
 #define IMP_LED 4
 
-CapacitiveSensor CS_1 = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_1); // 10M resistor between pins 4 & 8, pin 8 is sensor pin, add a wire and or foil
-CapacitiveSensor CS_2 = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_2); // 10M resistor between pins 4 & 6, pin 6 is sensor pin, add a wire and or foil
+CapacitiveSensor CapSensorL = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_L);
+CapacitiveSensor CapSensorR = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_R);
 
-// Variables
-long cs1Value = 0;
-long cs2Value = 0;
-bool capSw1Active = false;
-bool capSw2Active = false;
-bool bothActive = false;
-int impedence = 0;
+// Sensor Variables
+const int minCapThreshold = 0;
+const int maxCapThreshold = 9999;
+int curCapLeftThreshold = maxCapThreshold;
+int curCapRightThreshold = maxCapThreshold;
+int curImpThreshold = 0;
+int capLeftValue = 0;
+int capRightValue = 0;
+int impedenceValue = 0;
+bool capLeftActive = false;
+bool capRightActive = false;
+
+// Threshold Buffers
+const int ThresholdBufferSize = 20;
+int capLeftThresholdBuffer[ThresholdBufferSize];
+int capRightThresholdBuffer[ThresholdBufferSize];
+int impThresholdBuffer[ThresholdBufferSize]; // the readings from the analog input
+int thresholdBufferIndex = 0;                // the index of the current reading
+
+// Timing Variables (in Milliseconds)
+const int SensorCheckInterval = 50;
+const int ThresholdUpdateInterval = 25;
+const int ImpCheckBufferInterval = 500;
+const int CapCheckBufferInterval = 500;
+const int DisplayUpdateInterval = 500;
 unsigned long curMillis = 0;
+unsigned long prevSensorCheckMillis = 0;
 unsigned long prevThresholdUpdateMillis = 0;
-unsigned long prevDisplayUpdateMillis = 0;
-unsigned long prevStateUpdateMillis = 0;
-unsigned long prevThresholdUpdateMillis = 0;
-unsigned long curImpCheckMillis = 0;
-unsigned long prevImpCheckMillis = 0;
+unsigned long prevCapCheckBufferMillis = 0;
+unsigned long prevImpCheckBufferMillis = 0;
+unsigned long prevThresholdDisplayMillis = 0;
+unsigned long prevValueDisplayMillis = 0;
 
-// State handling
+// Display string variables
+char thresholdDisplayString[16];
+char valueDisplayString[16];
+
+// State Variables
 enum OutputState
 {
+  OUTPUT_INIT,
   IDLE,
   LEFT,
   RIGHT,
@@ -80,83 +98,355 @@ enum OutputState
 
 enum SensingState
 {
+  SENSING_INIT,
   CAPACITIVE,
   IMPEDENCE
 };
 
-OutputState curOutputState = IDLE;
-SensingState curSensingState = CAPACITIVE;
+OutputState curOutputState = OUTPUT_INIT;
+SensingState curSensingState = SENSING_INIT;
 
 // Function Declarations
-void updateThresholds();   // - updates thresholds every 200ms
-void updateDisplay();      // - updates display every 200ms
-void capacitiveCheck();    // - checks cap sensors individually, updates state if necessary
-void impedenceCheck();     // - checks impedence sensing circuit, updates state if necessary
-void updateSensingState(); // - switches sensing state, updating the relay
-void updateOutputState();  // - updates output state if necessary
-void sendOutputState();    // - prints output state via serial
-void updateLEDs();         // - Updates indicator LEDs
+void updateThresholds();                      // - updates thresholds every 200ms
+void updateThresholdDisplay();                // - updates threshold display when changing
+int bufferedThresholdRead(int[], pin_size_t); // - buffers threshold readings to make them more consistent with pots
+void checkSensors();                          // - checks the appropraite sensors and handles timing buffers
+void capacitiveCheck();                       // - checks cap sensors individually, updates state if necessary
+void impedenceCheck();                        // - checks impedence sensing circuit, updates state if necessary
+void updateValueDisplay();                    // - updates value display when changing
+void updateSensingState(SensingState);        // - switches sensing state, updating the relay
+void updateOutputState(OutputState);          // - updates output state if necessary
+void sendOutputState();                       // - prints output state via serial
+void updateLEDs();                            // - Updates indicator LEDs
 
 void setup()
 {
   Serial.begin(9600);
-  // CS_1.set_CS_AutocaL_Millis(0xFFFFFFFF); // turn off autocalibrate on channel 1 - just as an example
-  // CS_1.set_CS_AutocaL_Millis(0xFFFFFFFF);
-  // CS_2.set_CS_AutocaL_Millis(0xFFFFFFFF);
 
   pinMode(RELAY_PIN_1, OUTPUT);
   pinMode(RELAY_PIN_2, OUTPUT);
   pinMode(CAP_L_LED, OUTPUT);
   pinMode(CAP_R_LED, OUTPUT);
   pinMode(IMP_LED, OUTPUT);
-  digitalWrite(RELAY_PIN_1, HIGH);
-  digitalWrite(RELAY_PIN_2, HIGH);
-  digitalWrite(CAP_L_LED, LOW);
-  digitalWrite(CAP_R_LED, LOW);
-  digitalWrite(IMP_LED, LOW);
-  Serial.println('Magic Hands setup complete');
+  updateSensingState(CAPACITIVE);
+  updateOutputState(IDLE);
+
+  for (int i = 0; i < ThresholdBufferSize; i++)
+  {
+    capLeftThresholdBuffer[i] = 0;
+    capRightThresholdBuffer[i] = 0;
+    impThresholdBuffer[i] = 0;
+  }
+
+  lcd.init();
+  lcd.backlight();
+
+  curMillis = millis();
+  prevThresholdUpdateMillis = curMillis;
 }
 
 void loop()
 {
+
+  // Update current millis to be used across all function calls for main loop
   curMillis = millis();
-  prevMillis = curMillis;
-  digitalWrite(RELAY_PIN_1, HIGH);
-  digitalWrite(RELAY_PIN_2, HIGH);
-  while (curMillis - prevMillis < 8000)
+
+  if (curMillis - prevThresholdUpdateMillis > ThresholdUpdateInterval)
   {
-    curMillis = millis();
-    checkCapSwitches();
+    prevThresholdUpdateMillis = curMillis;
+    updateThresholds();
   }
 
-  prevMillis = curMillis;
-  digitalWrite(RELAY_PIN_1, LOW);
-  digitalWrite(RELAY_PIN_2, LOW);
-  while (curMillis - prevMillis < 8000)
+  if (curMillis - prevSensorCheckMillis > SensorCheckInterval)
   {
-    curMillis = millis();
-    checkImpedence();
+    prevSensorCheckMillis = curMillis;
+    checkSensors();
   }
 }
 
-void checkCapSwitches()
+/**
+ * @brief Updates thresholds every ThresholdUpdateInterval milliseconds
+ *
+ */
+void updateThresholds()
 {
-  //   cs1Value = CS_1.capacitiveSensor(30);
-  //   cs2Value = CS_2.capacitiveSensor(30);
-  cs1Value = CS_1.capacitiveSensorRaw(50);
-  cs2Value = CS_2.capacitiveSensorRaw(50);
-  Serial.print("CS 1 Val: "); // check on performance in milliseconds
-  Serial.print(cs1Value);     // print sensor output 2
-  Serial.print("\t|\t");
-  Serial.print("CS 2 Val: ");
-  Serial.println(cs2Value);
-  delay(100);
+  curCapLeftThreshold = map(bufferedThresholdRead(capLeftThresholdBuffer, CAP_L_POT), 0, 1023, minCapThreshold, maxCapThreshold);
+  curCapRightThreshold = map(bufferedThresholdRead(capRightThresholdBuffer, CAP_R_POT), 0, 1023, minCapThreshold, maxCapThreshold);
+  curImpThreshold = bufferedThresholdRead(impThresholdBuffer, IMP_POT);
+
+  // Increase buffer
+  thresholdBufferIndex++;
+  if (thresholdBufferIndex >= ThresholdBufferSize)
+  {
+    thresholdBufferIndex = 0;
+  }
+
+  updateThresholdDisplay();
+  return;
 }
 
-void checkImpedence()
+int bufferedThresholdRead(int buffer[], pin_size_t PIN)
 {
-  impedence = analogRead(IMP_CHECK);
-  Serial.print("Impedence: ");
-  Serial.println(impedence);
-  delay(100);
+  buffer[thresholdBufferIndex] = analogRead(PIN);
+  int total = 0;
+  for (int i = 0; i < ThresholdBufferSize; i++)
+  {
+    total += buffer[i];
+  }
+
+  return total / ThresholdBufferSize;
+}
+
+/**
+ * @brief
+ *
+ */
+void updateThresholdDisplay()
+{
+  if (curMillis - prevThresholdDisplayMillis < DisplayUpdateInterval)
+    return;
+
+  prevThresholdDisplayMillis = curMillis;
+  sprintf(thresholdDisplayString, "%04u  %04u  %04u", curCapLeftThreshold, curCapRightThreshold, curImpThreshold);
+  lcd.setCursor(0, 0);
+  lcd.print(thresholdDisplayString);
+  return;
+}
+
+/**
+ * @brief
+ *
+ * @param newSensingState
+ */
+void updateSensingState(SensingState newSensingState)
+{
+  // Only run update if new state
+  if (curSensingState != newSensingState)
+  {
+    curSensingState = newSensingState;
+
+    switch (curSensingState)
+    {
+    case CAPACITIVE:
+      digitalWrite(RELAY_PIN_1, HIGH);
+      digitalWrite(RELAY_PIN_2, HIGH);
+
+      // Update Cap buffer millis to prevent constant, quick switching
+      prevCapCheckBufferMillis = curMillis;
+      break;
+
+    case IMPEDENCE:
+      digitalWrite(RELAY_PIN_1, LOW);
+      digitalWrite(RELAY_PIN_2, LOW);
+
+      // Update Impedence buffer millis to allow time for impedence check to stabalize
+      prevImpCheckBufferMillis = curMillis;
+      break;
+
+    // Default to capacitive checking
+    default:
+      digitalWrite(RELAY_PIN_1, HIGH);
+      digitalWrite(RELAY_PIN_2, HIGH);
+      break;
+    }
+  }
+}
+
+/**
+ * @brief
+ *
+ */
+void checkSensors()
+{
+  switch (curSensingState)
+  {
+  case CAPACITIVE:
+    capacitiveCheck();
+    break;
+
+  case IMPEDENCE:
+    impedenceCheck();
+    break;
+  }
+
+  sendOutputState(); // Send output state after every sensor check
+  updateValueDisplay();
+}
+
+/**
+ * @brief
+ *
+ */
+const int CapSensorSamples = 50;
+void capacitiveCheck()
+{
+  capLeftValue = CapSensorL.capacitiveSensorRaw(CapSensorSamples);
+  capRightValue = CapSensorR.capacitiveSensorRaw(CapSensorSamples);
+  capLeftActive = capLeftValue > curCapLeftThreshold;
+  capRightActive = capRightValue > curCapRightThreshold;
+
+  if (capLeftActive && !capRightActive)
+  {
+    updateOutputState(LEFT);
+    return;
+  }
+
+  if (!capLeftActive && capRightActive)
+  {
+    updateOutputState(RIGHT);
+    return;
+  }
+
+  if (capLeftActive && capRightActive)
+  {
+    updateOutputState(BOTH);
+
+    // Only switch to Impedence sensing if buffer interval has worn off, to prevent constant switching when two separate people touch the hands
+    if (curMillis - prevCapCheckBufferMillis > CapCheckBufferInterval)
+    {
+      updateSensingState(IMPEDENCE);
+    }
+
+    return;
+  }
+
+  updateOutputState(IDLE);
+  return;
+}
+
+/**
+ * @brief
+ *
+ */
+void impedenceCheck()
+{
+  impedenceValue = analogRead(IMP_CHECK);
+
+  // Update and keep checking impedence while value is still above threshold
+  if (impedenceValue < curImpThreshold)
+  {
+    updateOutputState(JOINED);
+    prevImpCheckBufferMillis = curMillis;
+    return;
+  }
+
+  // Otherwise, continue checking impedence if we haven't triggered while buffer interval is still active, to allow for stabalizing of the signal
+  if (curOutputState != JOINED && curMillis - prevImpCheckBufferMillis < ImpCheckBufferInterval)
+  {
+    return;
+  }
+
+  // Finally, return to cap sensing if buffer has expired without triggering
+  updateSensingState(CAPACITIVE);
+  return;
+}
+
+/**
+ * @brief
+ *
+ */
+void updateValueDisplay()
+{
+  if (curMillis - prevValueDisplayMillis < DisplayUpdateInterval)
+    return;
+
+  prevValueDisplayMillis = curMillis;
+
+  switch (curSensingState)
+  {
+  case CAPACITIVE:
+    sprintf(valueDisplayString, "%04u  %04u  %4s", capLeftValue, capRightValue, " NA ");
+    break;
+  case IMPEDENCE:
+    sprintf(valueDisplayString, "%4s  %4s  %04u", " NA ", " NA ", impedenceValue);
+    break;
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(valueDisplayString);
+  return;
+}
+
+/**
+ * @brief
+ *
+ * @param newOutputState
+ */
+void updateOutputState(OutputState newOutputState)
+{
+  if (curOutputState != newOutputState)
+  {
+    curOutputState = newOutputState;
+    updateLEDs(); // Only update LEDs when a new state is detected
+  }
+}
+
+/**
+ * @brief
+ *
+ */
+void sendOutputState()
+{
+  switch (curOutputState)
+  {
+  case LEFT:
+    Serial.println("[100]");
+    break;
+
+  case RIGHT:
+    Serial.println("[010]");
+    break;
+
+  case BOTH:
+    Serial.println("[110]");
+    break;
+
+  case JOINED:
+    Serial.println("[001]");
+    break;
+
+  default:
+    Serial.println("[000]");
+    break;
+  }
+}
+
+/**
+ * @brief
+ *
+ */
+void updateLEDs()
+{
+  switch (curOutputState)
+  {
+  case LEFT:
+    digitalWrite(CAP_L_LED, HIGH);
+    digitalWrite(CAP_R_LED, LOW);
+    digitalWrite(IMP_LED, LOW);
+    break;
+
+  case RIGHT:
+    digitalWrite(CAP_L_LED, LOW);
+    digitalWrite(CAP_R_LED, HIGH);
+    digitalWrite(IMP_LED, LOW);
+    break;
+
+  case BOTH:
+    digitalWrite(CAP_L_LED, HIGH);
+    digitalWrite(CAP_R_LED, HIGH);
+    digitalWrite(IMP_LED, LOW);
+    break;
+
+  case JOINED:
+    digitalWrite(CAP_L_LED, LOW);
+    digitalWrite(CAP_R_LED, LOW);
+    digitalWrite(IMP_LED, HIGH);
+    break;
+
+  default:
+    digitalWrite(CAP_L_LED, LOW);
+    digitalWrite(CAP_R_LED, LOW);
+    digitalWrite(IMP_LED, LOW);
+    break;
+  }
 }
