@@ -80,10 +80,13 @@ unsigned long prevCapCheckBufferMillis = 0;
 unsigned long prevImpCheckBufferMillis = 0;
 unsigned long prevThresholdDisplayMillis = 0;
 unsigned long prevValueDisplayMillis = 0;
+unsigned long prevActiveDisplayMillis = 0;
 
 // Display string variables
-char thresholdDisplayString[16];
-char valueDisplayString[16];
+char labelDisplayString[20];
+char thresholdDisplayString[20];
+char valueDisplayString[20];
+char activeDisplayString[20];
 
 // State Variables
 enum OutputState
@@ -118,6 +121,7 @@ void updateSensingState(SensingState);        // - switches sensing state, updat
 void updateOutputState(OutputState);          // - updates output state if necessary
 void sendOutputState();                       // - prints output state via serial
 void updateLEDs();                            // - Updates indicator LEDs
+void updateActiveDisplay();                   // - updates active sensors when changing
 
 void setup()
 {
@@ -140,6 +144,9 @@ void setup()
 
   lcd.init();
   lcd.backlight();
+  sprintf(labelDisplayString, "LEFT | RGHT | JOIN");
+  lcd.setCursor(0, 0);
+  lcd.print(labelDisplayString);
 
   curMillis = millis();
   prevThresholdUpdateMillis = curMillis;
@@ -185,6 +192,10 @@ void updateThresholds()
   return;
 }
 
+/**
+ * @brief
+ *
+ */
 int bufferedThresholdRead(int buffer[], pin_size_t PIN)
 {
   buffer[thresholdBufferIndex] = analogRead(PIN);
@@ -207,8 +218,8 @@ void updateThresholdDisplay()
     return;
 
   prevThresholdDisplayMillis = curMillis;
-  sprintf(thresholdDisplayString, "%04u  %04u  %04u", curCapLeftThreshold, curCapRightThreshold, curImpThreshold);
-  lcd.setCursor(0, 0);
+  sprintf(thresholdDisplayString, "%04u | %04u | %04u", curCapLeftThreshold, curCapRightThreshold, curImpThreshold);
+  lcd.setCursor(0, 1);
   lcd.print(thresholdDisplayString);
   return;
 }
@@ -355,14 +366,14 @@ void updateValueDisplay()
   switch (curSensingState)
   {
   case CAPACITIVE:
-    sprintf(valueDisplayString, "%04u  %04u  %4s", capLeftValue, capRightValue, " NA ");
+    sprintf(valueDisplayString, "%04u | %04u | %4s", capLeftValue, capRightValue, " NA ");
     break;
   case IMPEDENCE:
-    sprintf(valueDisplayString, "%4s  %4s  %04u", " NA ", " NA ", impedenceValue);
+    sprintf(valueDisplayString, "%4s | %4s | %04u", " NA ", " NA ", impedenceValue);
     break;
   }
 
-  lcd.setCursor(0, 1);
+  lcd.setCursor(0, 2);
   lcd.print(valueDisplayString);
   return;
 }
@@ -378,6 +389,7 @@ void updateOutputState(OutputState newOutputState)
   {
     curOutputState = newOutputState;
     updateLEDs(); // Only update LEDs when a new state is detected
+    updateActiveDisplay();
   }
 }
 
@@ -449,4 +461,38 @@ void updateLEDs()
     digitalWrite(IMP_LED, LOW);
     break;
   }
+}
+
+/**
+ * @brief
+ *
+ */
+void updateActiveDisplay()
+{
+  switch (curOutputState)
+  {
+  case LEFT:
+    sprintf(activeDisplayString, "%4s | %4s | %4s", " ON ", "", "");
+    break;
+
+  case RIGHT:
+    sprintf(activeDisplayString, "%4s | %4s | %4s", "", " ON ", "");
+    break;
+
+  case BOTH:
+    sprintf(activeDisplayString, "%4s | %4s | %4s", " ON ", " ON ", "");
+    break;
+
+  case JOINED:
+    sprintf(activeDisplayString, "%4s | %4s | %4s", "", "", " ON ");
+    break;
+
+  case IDLE:
+    sprintf(activeDisplayString, "%4s | %4s | %4s", "", "", "");
+    break;
+  }
+
+  lcd.setCursor(0, 3);
+  lcd.print(activeDisplayString);
+  return;
 }
