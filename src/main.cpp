@@ -41,9 +41,9 @@ LiquidCrystal_I2C lcd(0x27, 20, 4); // set the LCD address to 0x27 for a 16 char
 #define IMP_POT A2
 #define RELAY_PIN_1 12
 #define RELAY_PIN_2 11
-#define CAP_L_LED 2
+#define CAP_L_LED 4
 #define CAP_R_LED 3
-#define IMP_LED 4
+#define IMP_LED 2
 
 CapacitiveSensor CapSensorL = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_L);
 CapacitiveSensor CapSensorR = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_R);
