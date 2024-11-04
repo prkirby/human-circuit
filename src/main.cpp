@@ -50,7 +50,7 @@ CapacitiveSensor CapSensorR = CapacitiveSensor(CAP_SEND_PIN, CAP_RECEIVE_R);
 
 // Sensor Variables
 const int minCapThreshold = 0;
-const int maxCapThreshold = 9999;
+const int maxCapThreshold = 15000;
 int curCapLeftThreshold = maxCapThreshold;
 int curCapRightThreshold = maxCapThreshold;
 int curImpThreshold = 0;
@@ -218,7 +218,7 @@ void updateThresholdDisplay()
     return;
 
   prevThresholdDisplayMillis = curMillis;
-  sprintf(thresholdDisplayString, "%04u | %04u | %04u", curCapLeftThreshold, curCapRightThreshold, curImpThreshold);
+  sprintf(thresholdDisplayString, "%05u| %05u| %04u", curCapLeftThreshold, curCapRightThreshold, curImpThreshold);
   lcd.setCursor(0, 1);
   lcd.print(thresholdDisplayString);
   return;
@@ -288,7 +288,7 @@ void checkSensors()
  * @brief
  *
  */
-const int CapSensorSamples = 50;
+const int CapSensorSamples = 100;
 void capacitiveCheck()
 {
   capLeftValue = CapSensorL.capacitiveSensorRaw(CapSensorSamples);
@@ -366,7 +366,7 @@ void updateValueDisplay()
   switch (curSensingState)
   {
   case CAPACITIVE:
-    sprintf(valueDisplayString, "%04u | %04u | %4s", capLeftValue, capRightValue, " NA ");
+    sprintf(valueDisplayString, "%05u| %05u| %4s", capLeftValue, capRightValue, " NA ");
     break;
   case IMPEDENCE:
     sprintf(valueDisplayString, "%4s | %4s | %04u", " NA ", " NA ", impedenceValue);
